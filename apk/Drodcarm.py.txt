@@ -264,3 +264,184 @@ def run():
 
 if __name__ == '__main__':
     run()
+    
+    
+    
+ #!/usr/bin/bin python3
+# -*- coding: utf-8 -*-
+# @Time    : 2020/8/1 19:42
+# @Author  : SuperDeng
+# @Email   : 1821333144@qq.com
+# @File    : socket_client.py
+# 基于http协议传输的视频数据流播放
+import sys
+import time
+import cv2
+import socket, threading
+import numpy as np
+import requests
+from tkinter import Radiobutton, IntVar, Button, Tk, messagebox
+
+def bytes2cv(im):
+    '''二进制图片转cv2
+
+    :param im: 二进制图片数据，bytes
+    :return: cv2图像，numpy.ndarray
+    '''
+    return cv2.imdecode(np.array(bytearray(im), dtype='uint8'), cv2.IMREAD_UNCHANGED)  # 从二进制图片数据中读取
+
+def cv2bytes(im):
+    '''cv2转二进制图片
+
+    :param im: cv2图像，numpy.ndarray
+    :return: 二进制图片数据，bytes
+    '''
+    return np.array(cv2.imencode('.png', im)[1]).tobytes()
+
+size_dict = {
+    '240p': '320x240',
+    '480p': '640x480',
+    '720p': '960x720',
+    'FHD 720p': '1280x720',
+    'FHD 1080p': '1920x1080',
+}
+
+get_url = {
+    'Limit_FPS': '/cam/1/fpslimit',
+    'Autofocus': '/cam/1/af',
+    'Toggle_LED': '/cam/1/led_toggle',
+    'Zoom_In': '/cam/1/zoomin',
+    'Zoom_Out': '/cam/1/zoomout',
+    'Save_Photo_on_SD': '/cam/1/takepic',
+}
+
+class DroidCam_Client:
+    def __init__(self, master):
+        self.master = master
+        self.master.protocol("WM_DELETE_WINDOW", self.handler)
+        self.playEvent = threading.Event()
+        self.size = size_dict['480p']
+        self.v = IntVar()
+        self.v.set(1)
+        self.createWidgets()
+        self.PlatState = False
+
+    def set_size(self):
+        self.size = list(size_dict.values())[self.v.get()]
+
+    def createWidgets(self):
+        """Build GUI."""
+
+        j = 0
+        for key in size_dict:
+            Radiobutton(self.master, variable=self.v, text=key, value=j, command=self.set_size).grid()
+            j += 1
+
+        self.setup = Button(self.master, width=15, padx=3, pady=3)
+        self.setup["text"] = "Play"
+        self.setup["command"] = self.Play
+        self.setup.grid(row=5, column=0, padx=2, pady=2)
+
+        c = 1
+        for func in get_url:
+            btn = Button(self.master, width=15, padx=3, pady=3)
+            btn["text"] = func
+            btn["command"] = getattr(self, func)
+            btn.grid(row=5, column=c, padx=2, pady=2)
+            c += 1
+
+    def play(self, size, event):
+        print(size)
+        sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sk.connect(("192.168.124.3", 4747))
+        data = 'GET /mjpegfeed?{} HTTP/1.1\r\nHost: 192.168.124.3:4747\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; WOW64; rv:53.0) Gecko/20100101 Firefox/53.0\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\nAccept-Language: zh-CN,zh;q=0.8,en-US;q=0.5,en;q=0.3\r\nAccept-Encoding: gzip, deflate\r\nConnection: keep-alive\r\nUpgrade-Insecure-Requests: 1\r\n\r\n'.format(
+            size)
+        sk.send(data.encode('utf-8'))
+        msg = sk.recv(1024)
+        recv_dict = msg.decode('utf-8').split('\r\n')
+        if 'Connection: Keep-Alive' in recv_dict:
+            self.__play(sk,size,event)
+        else:
+            print('DroidCam is connected to another client.')
+            print('Disconnect the other client and Take Over')
+            sk.close()
+
+    def __play(self,sk,size,event):
+        JPEG_header = b''
+        JPEG = b''
+        while True:
+            msg = sk.recv(1024)
+            if msg:
+                if b'\r\n\r\n' in msg:
+                    # 分界点到了
+                    JPEG_header += msg.split(b'\r\n\r\n')[0]
+                    long = int(JPEG_header.split(b'\r\n')[-1].split(b':')[-1])
+                    JPEG_header = b''
+                    JPEG += msg.split(b'\r\n\r\n')[1]
+                    while True:
+                        JPEG += sk.recv(1024)
+                        if len(JPEG) >= long:
+                            img = bytes2cv(JPEG[:long])
+                            cv2.imshow(f"DroidCam{size}", img)
+                            cv2.waitKey(1)
+                            JPEG_header += JPEG[long:]
+                            JPEG = b''
+                            break
+                else:
+                    JPEG_header += msg
+                if event.isSet():
+                    cv2.destroyWindow(f"DroidCam{size}")
+                    break
+        sk.close()
+
+    def Play(self):
+        if not self.PlatState:
+            threading.Thread(target=self.play, args=(self.size, self.playEvent)).start()
+            self.PlatState = True
+        else:
+            self.playEvent.set()
+            self.OverRide()
+            self.playEvent.clear()
+            time.sleep(1)
+            threading.Thread(target=self.play, args=(self.size, self.playEvent)).start()
+            self.PlatState = True
+
+    def handler(self):
+        """Handler on explicitly closing the GUI window."""
+        if messagebox.askokcancel("Quit?", "Are you sure you want to quit?"):
+            self.playEvent.set()
+            time.sleep(1)
+            self.master.destroy()  # Close the gui window
+            sys.exit(0)
+        else:  # When the user presses cancel, resume playing.
+            return
+
+    def Toggle_LED(self):
+        ret = requests.get('http://192.168.124.3:4747/cam/1/led_toggle')
+
+    def Limit_FPS(self):
+        ret = requests.get('http://192.168.124.3:4747/cam/1/fpslimit')
+
+    def Autofocus(self):
+        ret = requests.get('http://192.168.124.3:4747/cam/1/af')
+
+    def Zoom_In(self):
+        ret = requests.get('http://192.168.124.3:4747/cam/1/zoomin')
+
+    def Zoom_Out(self):
+        ret = requests.get('http://192.168.124.3:4747/cam/1/zoomout')
+
+    def OverRide(self):
+        ret = requests.get('http://192.168.124.3:4747/override')
+
+    def Save_Photo_on_SD(self):
+        ret = requests.get('http://192.168.124.3:4747/cam/1/takepic')
+
+def run():
+    root = Tk()
+    app = DroidCam_Client(root)
+    app.master.title("DroidCam_Client")
+    root.mainloop()
+
+if __name__ == '__main__':
+    run()
