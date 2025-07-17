@@ -1,0 +1,266 @@
+#!/usr/bin/bin python3
+# -*- coding: utf-8 -*-
+# @Time    : 2020/8/28 11:31
+# @AuThor  : SuperDeng
+# @Email   : 1821333144@qq.com
+# @file    : DroidCam_TCP_Client.py
+
+# 基于TCP协议实现的DroidCam客户端
+
+import sys
+import time
+import cv2
+import socket, threading
+import numpy as np
+import requests
+from tkinter import Radiobutton, IntVar, Button, Tk, messagebox
+
+def bytes2cv(im):
+    '''二进制图片转cv2
+
+    :param im: 二进制图片数据，bytes
+    :return: cv2图像，numpy.ndarray
+    '''
+    return cv2.imdecode(np.array(bytearray(im), dtype='uint8'), cv2.IMREAD_UNCHANGED)  # 从二进制图片数据中读取
+
+def cv2bytes(im):
+    '''cv2转二进制图片
+
+    :param im: cv2图像，numpy.ndarray
+    :return: 二进制图片数据，bytes
+    '''
+    return np.array(cv2.imencode('.png', im)[1]).tobytes()
+
+size_dict = {
+    '240x320': '240x320',
+    '320x240': '320x240',
+    '352x288': '352x288',
+    '480x320': '480x320',
+    '480x360': '480x360',
+    '480x640': '480x640',
+    '640x360': '640x360',
+    '640x480': '640x480',
+    '640x640': '640x640',
+    '720x480': '720x480',
+    '864x480': '864x480',
+    '1280x640': '1280x640',
+    '1280x720': '1280x720',
+    '1280x960': '1280x960',
+    '1920x960': '1920x960',
+    '1920x1080': '1920x1080',
+}
+
+tcp_func = {
+    # 'Limit_FPS': '/cam/1/fpslimit',
+    'Autofocus': b'CMD /v1/ctl?8',
+    'Toggle_LED': b'CMD /v1/ctl?9',
+    'Zoom_In': b'CMD /v1/ctl?7',
+    'Zoom_Out': b'CMD /v1/ctl?6',
+    # 'Save_Photo_on_SD': '/cam/1/takepic',        # url
+    # 音频流 udp 发送至4748服务端
+    'Audio': b'CMD /v2/audio',  # udp 客户端向4748发送,然后获取字节
+    'Stop': b'CMD /v1/stop'  # #  udp 客户端向4748发送
+}
+
+get_url = {
+    'Limit_FPS': '/cam/1/fpslimit',
+    'Autofocus': '/cam/1/af',
+    'Toggle_LED': '/cam/1/led_toggle',
+    'Zoom_In': '/cam/1/zoomin',
+    'Zoom_Out': '/cam/1/zoomout',
+    'Save_Photo_on_SD': '/cam/1/takepic',
+}
+
+s = b'\xff\xd8'
+e = b'\xff\xd9'
+
+class DroidCam_Client:
+    def __init__(self, master):
+        self.master = master
+        self.master.protocol("WM_DELETE_WINDOW", self.handler)
+        self.playEvent = threading.Event()
+        self.size = size_dict['640x640']
+        self.v = IntVar()
+        self.v.set(8)
+        self.createWidgets()
+        self.PlatState = False
+
+    def set_size(self):
+        self.size = list(size_dict.values())[self.v.get()]
+
+    def createWidgets(self):
+        """Build GUI."""
+
+        j = 0
+        rr = 0
+        cc = -1
+        for key in size_dict:
+            if cc < 6:
+                cc += 1
+            else:
+                rr += 1
+                cc = 0
+            Radiobutton(self.master, variable=self.v, text=key, value=j, command=self.set_size).grid(row=rr, column=cc)
+            j += 1
+
+        s = len(size_dict) + 1
+        self.setup = Button(self.master, width=15, padx=3, pady=3)
+        self.setup["text"] = "Play"
+        self.setup["command"] = self.Play
+        self.setup.grid(row=s, column=0, padx=2, pady=2)
+
+        self.setup = Button(self.master, width=15, padx=3, pady=3)
+        self.setup["text"] = "Get_Audio"
+        self.setup["command"] = self.Get_Audio
+        self.setup.grid(row=s+1, column=0, padx=2, pady=2)
+
+        c = 1
+        for func in get_url:
+            btn = Button(self.master, width=15, padx=3, pady=3)
+            btn["text"] = func
+            btn["command"] = getattr(self, func)
+            btn.grid(row=s, column=c, padx=2, pady=2)
+            c += 1
+
+    def play(self, size, event):
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
+        eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+
+        smile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_smile.xml')
+        sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sk.connect(("192.168.124.3", 4747))
+        s1 = 'CMD /v2/video{}?'.format(size)
+        print(s1)
+        sk.send(s1.encode('utf-8'))
+        s = sk.recv(1024)
+        jpeg_data = b''
+        tmp_data = b''
+        while 1:
+            msg = sk.recv(1024)
+            if e not in msg:
+                jpeg_data += msg
+            else:
+                if msg.endswith(e):
+                    jpeg_data += msg
+                else:
+                    a, b = msg.split(e)
+                    jpeg_data = jpeg_data + a + e
+                    tmp_data = b
+                frame = bytes2cv(jpeg_data[4:])
+                faces = face_cascade.detectMultiScale(frame, 1.3, 2)
+                img = frame
+                for (x, y, w, h) in faces:
+                    # 画出人脸框，蓝色，画笔宽度微
+                    img = cv2.rectangle(img, (x, y), (x + w, y + h), (255, 0, 0), 2)
+                    # 框选出人脸区域，在人脸区域而不是全图中进行人眼检测，节省计算资源
+                    face_area = img[y:y + h, x:x + w]
+
+                    ## 人眼检测
+                    # 用人眼级联分类器引擎在人脸区域进行人眼识别，返回的eyes为眼睛坐标列表
+                    eyes = eye_cascade.detectMultiScale(face_area, 1.3, 10)
+                    for (ex, ey, ew, eh) in eyes:
+                        # 画出人眼框，绿色，画笔宽度为1
+                        cv2.rectangle(face_area, (ex, ey), (ex + ew, ey + eh), (0, 255, 0), 1)
+
+                    ## 微笑检测
+                    # 用微笑级联分类器引擎在人脸区域进行人眼识别，返回的eyes为眼睛坐标列表
+                    smiles = smile_cascade.detectMultiScale(face_area, scaleFactor=1.16, minNeighbors=65,
+                                                            minSize=(25, 25),
+                                                            flags=cv2.CASCADE_SCALE_IMAGE)
+                    for (ex, ey, ew, eh) in smiles:
+                        # 画出微笑框，红色（BGR色彩体系），画笔宽度为1
+                        cv2.rectangle(face_area, (ex, ey), (ex + ew, ey + eh), (0, 0, 255), 1)
+                        cv2.putText(img, 'Smile', (x, y - 7), 3, 1.2, (0, 0, 255), 2, cv2.LINE_AA)
+
+                # 实时展示效果画面
+                cv2.imshow(f"DroidCam{size}", img)
+                # 每5毫秒监听一次键盘动作
+                if cv2.waitKey(5) & 0xFF == ord('q'):
+                    break
+
+                self.s = f"{len(img[0])}x{len(img)}"
+                key = cv2.waitKey(1)
+                if key == 27:
+                    cv2.destroyWindow(f"DroidCam{size}")
+                    event.set()
+                    break
+                jpeg_data = tmp_data
+                tmp_data = b''
+            if event.isSet():
+                cv2.destroyWindow(f"DroidCam{size}")
+                break
+
+    def Play(self):
+        if not self.PlatState:
+            threading.Thread(target=self.play, args=(self.size, self.playEvent)).start()
+            self.PlatState = True
+        else:
+            self.playEvent.set()
+            self.OverRide()
+            self.playEvent.clear()
+            time.sleep(1)
+            threading.Thread(target=self.play, args=(self.size, self.playEvent)).start()
+            self.PlatState = True
+
+    def handler(self):
+        """Handler on explicitly closing the GUI window."""
+        if messagebox.askokcancel("Quit?", "Are you sure you want to quit?"):
+            self.playEvent.set()
+            time.sleep(1)
+            self.master.destroy()  # Close the gui window
+            sys.exit(0)
+        else:  # When the user presses cancel, resume playing.
+            return
+
+    def Toggle_LED(self):
+        ret = requests.get('http://192.168.124.3:4747/cam/1/led_toggle')
+
+    def Limit_FPS(self):
+        ret = requests.get('http://192.168.124.3:4747/cam/1/fpslimit')
+
+    def Autofocus(self):
+        ret = requests.get('http://192.168.124.3:4747/cam/1/af')
+
+    def Zoom_In(self):
+        ret = requests.get('http://192.168.124.3:4747/cam/1/zoomin')
+
+    def Zoom_Out(self):
+        ret = requests.get('http://192.168.124.3:4747/cam/1/zoomout')
+
+    def OverRide(self):
+        ret = requests.get('http://192.168.124.3:4747/override')
+
+    def Save_Photo_on_SD(self):
+        ret = requests.get('http://192.168.124.3:4747/cam/1/takepic')
+
+    def Get_Audio(self):
+        f = open("123.mp3","wb")
+        sk = socket.socket(type=socket.SOCK_DGRAM)
+        ipaddr = ("192.168.124.3", 4748)
+        sk.sendto(b"CMD /v2/audio", ipaddr)
+        count = 0
+        while 1:
+            count += 1
+            msg, _ = sk.recvfrom(1024)
+            if msg:
+                # 解析音频数据
+                print(count)
+                f.write(msg[1:])
+            else:
+                break
+            if count == 10000: break
+
+        print("exit")
+        f.flush()
+        f.close()
+        sk.close()
+
+def run():
+    root = Tk()
+    app = DroidCam_Client(root)
+    app.master.title("DroidCam_TCP_Client")
+    root.mainloop()
+
+if __name__ == '__main__':
+    run()
